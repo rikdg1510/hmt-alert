@@ -72,6 +72,28 @@ def classify(text: str) -> str:
         return "in_stock"
     return "unknown"
 
+def goto_robust(page, url, tries=3):
+    """Load a page without relying on 'networkidle' (this site never goes idle)."""
+    last = None
+    for attempt in range(1, tries + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            try:
+                page.wait_for_load_state("load", timeout=20000)
+            except Exception:
+                pass
+            try:  # wait for product images/links to render
+                page.wait_for_function("document.querySelectorAll('a img').length > 3", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
+            return
+        except Exception as e:
+            last = e
+            print(f"   attempt {attempt}/{tries} failed for {url}: {str(e).splitlines()[0]}")
+            page.wait_for_timeout(5000)
+    raise last
+
 def load_all(page):
     """Scroll / click 'load more' so lazy-loaded products appear."""
     for sel in ("text=Include out of Stock", "label:has-text('Include out of Stock')"):
@@ -97,7 +119,7 @@ def load_all(page):
 
 def scrape_listing(page, slug):
     print(f"Scanning {BASE}/{slug}")
-    page.goto(f"{BASE}/{slug}", wait_until="networkidle", timeout=60000)
+    goto_robust(page, f"{BASE}/{slug}")
     load_all(page)
     items = page.evaluate(EXTRACT_JS)
     for it in items:
@@ -107,7 +129,7 @@ def scrape_listing(page, slug):
 
 def check_product_page(page, url):
     """Authoritative check on the product page itself."""
-    page.goto(url, wait_until="networkidle", timeout=60000)
+    goto_robust(page, url)
     body = page.inner_text("body").lower()
     if "coming soon" in body:
         return "coming_soon"
