@@ -13,7 +13,7 @@ Usage:
 Config via environment variables:
   NTFY_TOPIC      ntfy.sh topic -> push to phone (install the ntfy app, subscribe)
   SMTP_HOST, SMTP_PORT (587), SMTP_USER, SMTP_PASS, MAIL_TO   -> email (optional)
-  HMT_PAGES       comma list, default: mens,womens,pair,unisex
+  HMT_PAGES       comma list, default: mens
   HMT_WATCH       optional comma list of keywords; only alert for names containing one
                   e.g. "gandaberunda,vijay"
   NOTIFY_NEW      "1" to also alert on brand-new listings that appear already in stock
@@ -28,10 +28,12 @@ import requests
 from playwright.sync_api import sync_playwright
 
 BASE = "https://www.hmtwatches.in"
-PAGES = [p.strip() for p in os.getenv("HMT_PAGES", "mens,womens,pair,unisex").split(",") if p.strip()]
+PAGES = [p.strip() for p in os.getenv("HMT_PAGES", "mens").split(",") if p.strip()]
 WATCH = [w.strip().lower() for w in os.getenv("HMT_WATCH", "").split(",") if w.strip()]
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 NOTIFY_NEW = os.getenv("NOTIFY_NEW") == "1"
+# Skip any product whose name or URL contains one of these words (default: women's watches)
+EXCLUDE = [w.strip().lower() for w in os.getenv("HMT_EXCLUDE", "women,ladies").split(",") if w.strip()]
 
 # Anchors on the listing page that wrap a product image; climbs to the card boundary.
 EXTRACT_JS = r"""
@@ -94,6 +96,7 @@ def load_all(page):
         prev = n
 
 def scrape_listing(page, slug):
+    print(f"Scanning {BASE}/{slug}")
     page.goto(f"{BASE}/{slug}", wait_until="networkidle", timeout=60000)
     load_all(page)
     items = page.evaluate(EXTRACT_JS)
@@ -171,8 +174,14 @@ def main():
                 print(f"!! {slug}: {e}"); errors += 1; continue
             if not items:
                 print(f"!! {slug}: found 0 products (site layout changed or blocked?)"); errors += 1; continue
+            skipped = 0
             for it in items:
-                current[it["url"]] = {"name": name_of(it), "status": it["status"], "slug": slug}
+                nm = name_of(it)
+                if EXCLUDE and any(x in (nm + " " + it["url"]).lower() for x in EXCLUDE):
+                    skipped += 1
+                    continue
+                current[it["url"]] = {"name": nm, "status": it["status"], "slug": slug}
+            print(f"{slug}: kept {len(items) - skipped}, skipped {skipped} excluded")
 
         # Resolve 'unknown' cards, and double-check any apparent flip to in_stock
         for url, rec in current.items():
