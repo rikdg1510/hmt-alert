@@ -1,8 +1,13 @@
 name: HMT stock alert
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (GitHub may delay runs a few minutes)
+    - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      test:
+        description: "Only send a test notification"
+        type: boolean
+        default: false
 permissions:
   contents: write
 concurrency: hmt-alert
@@ -15,8 +20,16 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt && playwright install --with-deps chromium
-      - run: python monitor.py
+      - name: Test notification
+        if: ${{ inputs.test }}
+        run: python monitor.py --test
         env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      - name: Check stock
+        if: ${{ !inputs.test }}
+        run: python monitor.py
+        env:
+          HMT_PAGES: mens
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
