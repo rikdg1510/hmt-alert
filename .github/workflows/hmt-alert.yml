@@ -30,6 +30,7 @@ jobs:
         run: python monitor.py
         env:
           HMT_PAGES: mens
+          NOTIFY_NEW: "1"
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -37,9 +38,17 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           HMT_WATCH: ${{ vars.HMT_WATCH }}
+      - name: Upload debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug
+          path: debug/
+          if-no-files-found: ignore
       - name: Save state
         if: always()
         run: |
           git config user.name "hmt-bot"; git config user.email "bot@users.noreply.github.com"
-          git add state.json || true
+          git add state.json 2>/dev/null || true
+          git add health.json 2>/dev/null || true
           git diff --cached --quiet || (git commit -m "update state" && git pull --rebase -X theirs && git push)
