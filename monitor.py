@@ -88,7 +88,8 @@ def goto_robust(page, url, tries=3):
     last = None
     for attempt in range(1, tries + 1):
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            status = resp.status if resp else None
             try:
                 page.wait_for_load_state("load", timeout=20000)
             except Exception:
@@ -98,7 +99,7 @@ def goto_robust(page, url, tries=3):
             except Exception:
                 pass
             page.wait_for_timeout(3000)
-            return
+            return status
         except Exception as e:
             last = e
             print(f"   attempt {attempt}/{tries} failed for {url}: {str(e).splitlines()[0]}")
@@ -162,11 +163,36 @@ def load_all(page):
             break
     print(f"   Load More clicked {clicks} time(s); {count_products(page)} products loaded")
 
+def diagnose(page, slug, status, attempt):
+    """Print what the page looks like when no products were found, and save a screenshot/HTML."""
+    try:
+        body = " ".join(page.inner_text("body").split())[:300]
+        n_links = page.evaluate("document.querySelectorAll('a[href*=\"product_overview\"]').length")
+        n_soon = page.evaluate("(document.body.innerText.match(/coming soon/gi) || []).length")
+        print(f"   [diag {slug} #{attempt}] http={status} title={page.title()!r} product_links={n_links} 'coming soon' mentions={n_soon}")
+        print(f"   [diag] page text starts: {body}")
+        Path("debug").mkdir(exist_ok=True)
+        page.screenshot(path=f"debug/{slug}-{attempt}.png", full_page=False)
+        Path(f"debug/{slug}-{attempt}.html").write_text(page.content()[:400000], encoding="utf-8")
+    except Exception as e:
+        print(f"   [diag] failed: {e}")
+
 def scrape_listing(page, slug):
-    print(f"Scanning {BASE}/{slug}")
-    goto_robust(page, f"{BASE}/{slug}")
-    load_all(page)
-    items = page.evaluate(EXTRACT_JS)
+    url = f"{BASE}/{slug}"
+    print(f"Scanning {url}")
+    items = []
+    for attempt in range(1, 4):
+        status = goto_robust(page, url)
+        try:  # products arrive via AJAX after the page opens: wait for the cards themselves
+            page.wait_for_selector('a[href*="product_overview"] img', timeout=45000)
+        except Exception:
+            print(f"   attempt {attempt}/3: no product cards appeared within 45 s")
+        load_all(page)
+        items = page.evaluate(EXTRACT_JS)
+        if items:
+            break
+        diagnose(page, slug, status, attempt)
+        page.wait_for_timeout(10000)
     for it in items:
         it["status"] = classify(it["text"])
         it["slug"] = slug
@@ -180,17 +206,19 @@ def check_product_page(page, url):
         title = page.locator("h1, h2, h3").filter(has_text=re.compile("hmt", re.I)).first.inner_text(timeout=3000).strip()
     except Exception:
         pass
-    body = page.inner_text("body").lower()
-    if "coming soon" in body:
-        return "coming_soon", title
-    if "out of stock" in body or "sold out" in body:
-        return "out_of_stock", title
+    # Positive evidence first: a visible, enabled Add to Cart button means it can be bought,
+    # even if the page mentions "coming soon" elsewhere (related items, banners).
     btn = page.locator("button:has-text('Add to cart'), a:has-text('Add to cart'), input[value*='Add to cart' i]")
     try:
         if btn.count() and btn.first.is_visible() and btn.first.is_enabled():
             return "in_stock", title
     except Exception:
         pass
+    body = page.inner_text("body").lower()
+    if "coming soon" in body:
+        return "coming_soon", title
+    if "out of stock" in body or "sold out" in body:
+        return "out_of_stock", title
     return "unknown", title
 
 # ---------- notifications ----------
@@ -213,6 +241,25 @@ def notify(title, message, url=None):
     if not sent:
         print("!! No notification channel configured (set NTFY_TOPIC and/or SMTP_*)")
     print(f"[notify] {title} | {message}")
+
+HEALTH_FILE = Path("health.json")
+FAIL_ALERT_AT = int(os.getenv("FAIL_ALERT_AT", "6"))   # consecutive failed runs before a phone alert
+
+def record_health(ok):
+    try:
+        h = json.loads(HEALTH_FILE.read_text()) if HEALTH_FILE.exists() else {"fails": 0}
+    except Exception:
+        h = {"fails": 0}
+    if ok:
+        if h.get("fails", 0) >= FAIL_ALERT_AT:
+            notify("HMT monitor recovered", "The HMT stock monitor is working again.")
+        h["fails"] = 0
+    else:
+        h["fails"] = h.get("fails", 0) + 1
+        if h["fails"] == FAIL_ALERT_AT:
+            notify("HMT monitor is failing", f"The last {FAIL_ALERT_AT} checks could not read the site. "
+                   "Check the GitHub Actions log.")
+    HEALTH_FILE.write_text(json.dumps(h))
 
 def main():
     ap = argparse.ArgumentParser()
@@ -281,7 +328,9 @@ def main():
         return
 
     if not current:
+        record_health(False)
         sys.exit("No products scraped; state left untouched.")
+    record_health(errors == 0)
 
     if prev is None:
         STATE_FILE.write_text(json.dumps(current, indent=2))
